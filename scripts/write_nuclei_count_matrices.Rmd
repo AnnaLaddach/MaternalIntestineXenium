@@ -1,0 +1,78 @@
+---
+title: "Get matrix of transcripts per segmented nuclei"
+output: html_notebook
+---
+
+Load packages.
+```{r}
+library(arrow)
+library(Seurat)
+options(Seurat.object.assay.version = "v5")
+library(future)
+plan("multisession", workers = 8)
+library(ggplot2)
+library(interp)
+library(rdist)
+library(Matrix)
+library(dplyr)
+library(future)
+library(DropletUtils)
+options(future.globals.maxSize = 1000*1024^2)
+source("seurat_utility_functions.R")
+```
+
+Function to get matrix of transcript counts per nuclei.
+```{r}
+write_nuclei_data = function(run, dataset){
+  
+  #read in transcripts
+  transcripts = read_parquet(paste0(run, dataset,"/transcripts.parquet"))
+  
+  #subset to those in nucleus
+  transcripts = transcripts[transcripts$overlaps_nucleus == 1,]
+  mat = table(transcripts$cell_id, transcripts$feature_name)
+  
+  #remove control probes
+  mat = mat[, !(grepl("UnassignedCodeword", colnames(mat)))]
+  mat = mat[, !(grepl("NegControl", colnames(mat)))]
+  
+  #transpose matrix
+  mat = t(mat)
+  
+  #convert to sparse
+  mat = Matrix(mat, sparse = TRUE)    
+  
+  #write counts in hdf5 format
+  write10xCounts(
+    paste0(run, dataset,"/nuclei_data.h5"),
+    mat,
+    type = "HDF5",
+    version = "3"
+  )
+}
+```
+
+Set dataset info.
+```{r}
+datasets_r1 = c("output-XETG00207__0034181__TA1__20240704__113512","output-XETG00207__0034181__TA2__20240704__113512","output-XETG00207__0034181__TA3__20240704__113512","output-XETG00207__0033712__TA4__20240704__113512","output-XETG00207__0033712__TA5__20240704__113512","output-XETG00207__0033712__TA6__20240704__113512")
+names(datasets_r1) = c("TA1","TA2","TA3","TA4","TA5","TA6")
+
+datasets_r2 = c("output-XETG00207__0033726__TA7__20240710__115843","output-XETG00207__0033726__TA8__20240710__115843","output-XETG00207__0033726__TA9__20240710__115843","output-XETG00207__0033724__TA10__20240710__115843","output-XETG00207__0033724__TA11__20240710__115843","output-XETG00207__0033724__TA12__20240710__115843")
+names(datasets_r2) = c("TA7","TA8","TA9","TA10","TA11","TA12")
+```
+
+Write nuclei count matrices.
+```{r}
+for (sample in names(datasets_r1)){
+  print(sample)
+  try(write_nuclei_data("../20240704__113302__040724_Tomo_mouse_gutroll_run1/",datasets_r1[[sample]]))
+} 
+
+for (sample in names(datasets_r2)){
+  print(sample)
+  try(write_nuclei_data("../20240710__115631__100724_Tomo_mouse_gutroll_run2/",datasets_r2[[sample]]))
+} 
+```
+
+
+

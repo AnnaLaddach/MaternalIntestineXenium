@@ -1,0 +1,222 @@
+---
+title: "Analyse cell size"
+output: html_notebook
+---
+
+Load libraries.
+```{r}
+library(Seurat)
+library(future)
+plan("multisession", workers = 1)
+library(ggplot2)
+library(interp)
+library(rdist)
+library(Matrix)
+library(dplyr)
+library(future)
+library(BPCells)
+options(future.globals.maxSize = 4000*1024^2)
+source("seurat_utility_functions.R")
+library(data.table)
+library(lme4)
+library(emmeans)
+library(car)
+library(lmerTest)
+```
+
+# Prepare cell and cluster metadata
+
+Set dataset information.
+```{r}
+datasets_r1 = c("output-XETG00207__0034181__TA1__20240704__113512","output-XETG00207__0034181__TA2__20240704__113512","output-XETG00207__0034181__TA3__20240704__113512","output-XETG00207__0033712__TA4__20240704__113512","output-XETG00207__0033712__TA5__20240704__113512","output-XETG00207__0033712__TA6__20240704__113512")
+names(datasets_r1) = c("TA1","TA2","TA3","TA4","TA5","TA6")
+meta = c("V","P","L","V","P","L")
+names(meta) =  c("TA1","TA2","TA3","TA4","TA5","TA6")
+
+datasets_r2 = c("output-XETG00207__0033726__TA7__20240710__115843","output-XETG00207__0033726__TA8__20240710__115843","output-XETG00207__0033726__TA9__20240710__115843","output-XETG00207__0033724__TA10__20240710__115843","output-XETG00207__0033724__TA11__20240710__115843","output-XETG00207__0033724__TA12__20240710__115843")
+names(datasets_r2) = c("TA7","TA8","TA9","TA10","TA11","TA12")
+meta = c("V","P","L","V","P","L")
+names(meta) =   c("TA7","TA8","TA9","TA10","TA11","TA12")
+```
+
+Read in cell meta data.
+```{r}
+cells = fread(paste0("../20240704__113302__040724_Tomo_mouse_gutroll_run1/", datasets_r1[["TA1"]],"/cells.csv.gz"))
+
+cells$id = paste0("TA1-", cells$cell_id)
+cells$sample = "TA1"
+
+for (sample in  c("TA2","TA3","TA4","TA5","TA6")){
+  cellsTemp = fread(paste0("../20240704__113302__040724_Tomo_mouse_gutroll_run1/", datasets_r1[[sample]],"/cells.csv.gz"))
+  cellsTemp$id = paste0(sample,"-", cellsTemp$cell_id)
+  cellsTemp$sample = sample
+  cells = rbind(cells,cellsTemp)
+}
+
+for (sample in   c("TA7","TA8","TA9","TA10","TA11","TA12")){
+  cellsTemp = fread(paste0("../20240710__115631__100724_Tomo_mouse_gutroll_run2/", datasets_r2[[sample]],"/cells.csv.gz"))
+  cellsTemp$id = paste0(sample,"-", cellsTemp$cell_id)
+  cellsTemp$sample = sample 
+  cells = rbind(cells,cellsTemp)
+}
+```
+
+Set directory.
+```{r}
+nuclei_directory = "../output/merged_analysis_nuclei/"
+```
+
+Read in meta data on clusters.
+```{r}
+nuclei_meta = read.csv(paste0(nuclei_directory,"nuclei_meta.csv"))
+rownames(nuclei_meta) = nuclei_meta$cell_names
+```
+
+Filter cell meta data for those assigned clusters.
+```{r}
+cells_selected = cells[cells$id %in% nuclei_meta$cell_names,]
+```
+
+Set clusters information.
+```{r}
+cells_selected$cluster = nuclei_meta$epi_res0.5
+```
+
+Create directory for results.
+```{r}
+cell_stats_dir = paste0(nuclei_directory,"cell_stats/")
+dir.create(cell_stats_dir)
+```
+
+Add meta data about condition and replicate.
+```{r}
+cells_selected$condition = ""
+cells_selected$condition[cells_selected$sample %in% c("TA1","TA4","TA7","TA10")] = "Virgin"
+cells_selected$condition[cells_selected$sample %in% c("TA2","TA5","TA8","TA11")] = "Pregnant"
+cells_selected$condition[cells_selected$sample %in% c("TA3","TA6","TA9","TA12")] = "Lactating"
+
+cells_selected$replicate = ""
+cells_selected$replicate[cells_selected$sample %in% c("TA1","TA2","TA3")] = 1
+cells_selected$replicate[cells_selected$sample %in% c("TA4","TA5","TA6")] = 2
+cells_selected$replicate[cells_selected$sample %in% c("TA7","TA8","TA9")] = 3
+cells_selected$replicate[cells_selected$sample %in% c("TA10","TA11","TA12")] = 4
+
+cells_selected$condition = factor(cells_selected$condition, levels = c("Virgin","Pregnant","Lactating"))
+cells_selected$replicate = factor(cells_selected$replicate)
+```
+
+Add information on log cell area.
+```{r}
+cells_selected$cell_area_log = log(cells_selected$cell_area)
+cells_selected$nucleus_area_log = log(cells_selected$nucleus_area)
+```
+
+
+# Plot cell and nucleus area
+
+Iterate through clusters and plot  cell and nucleus areas.
+```{r}
+for (i in seq(0,18,1)){
+  print(i)
+  
+  selected = cells_selected[cells_selected$cluster == i,]
+  
+  p = ggplot(data = selected, aes(x = replicate, y = cell_area, color = condition)) + geom_violin() + geom_boxplot(width=0.1) + facet_wrap(~condition) + theme_classic() +
+  theme(text = element_text(size = 20))
+  print(p)
+  ggsave(paste0(cell_stats_dir, "cell_area_cluster_", i, ".pdf"))
+   p = ggplot(data = selected, aes(x = replicate, y = cell_area_log, color = condition)) + geom_violin() + geom_boxplot(width=0.1) + facet_wrap(~condition) + theme_classic() +
+  theme(text = element_text(size = 20))
+  print(p)
+  ggsave(paste0(cell_stats_dir, "cell_area_log_cluster_", i, ".pdf"))
+   p = ggplot(data = selected, aes(x = replicate, y = nucleus_area, color = condition)) + geom_violin() + geom_boxplot(width=0.1) + facet_wrap(~condition) + theme_classic() +
+  theme(text = element_text(size = 20))
+  print(p)
+  ggsave(paste0(cell_stats_dir, "nucleus_area_cluster_", i, ".pdf"))
+   p = ggplot(data = selected, aes(x = replicate, y = nucleus_area_log, color = condition)) + geom_violin() + geom_boxplot(width=0.1) + facet_wrap(~condition) + theme_classic() +
+  theme(text = element_text(size = 20))
+  print(p)
+  ggsave(paste0(cell_stats_dir, "nucleus_area_log_cluster_", i, ".pdf"))
+}
+```
+
+
+# Statistics for cell and nucleus area
+
+Calculate statisics for cell area.
+```{r}
+all_emmeans = list()
+all_contrasts = list()
+all_coef = list()
+
+for (i in seq(0,18,1)){
+  print(i)
+  selected = cells_selected[cells_selected$cluster == i,]
+  print(dim(selected))
+  
+  # linear mixed-effects model 
+  res = lmer(cell_area_log ~ condition + (1 | replicate/sample), data = selected)
+  posthoc = emmeans(res, pairwise ~ condition)
+  res = coef(summary(res))
+  res = as.data.frame(res)
+  res$cluster = i
+  
+  # post hoc
+  means = as.data.frame(posthoc$emmeans)
+  means$cluster = i
+  contrasts =  as.data.frame(posthoc$contrasts)
+  contrasts$cluster = i
+  
+  all_emmeans[[i+1]] = means
+  all_contrasts[[i+1]] = contrasts
+  all_coef[[i+1]] = res
+}
+
+write.csv(do.call(rbind, all_emmeans), paste0(cell_stats_dir, "emmeans_cell_size.csv"))
+
+all_contrasts_df = do.call(rbind, all_contrasts)
+all_contrasts_df$p.adj.overall = p.adjust(all_contrasts_df$p.value, method = "fdr")
+write.csv(all_contrasts_df, paste0(cell_stats_dir, "contrasts_cell_size.csv"))
+
+all_coef_df = do.call(rbind, all_coef)
+write.csv(all_coef_df, paste0(cell_stats_dir, "lmer_cell_size.csv"))
+```
+
+Calculate statisics for nucleus area.
+```{r}
+all_emmeans = list()
+all_contrasts = list()
+all_coef = list()
+
+for (i in seq(0,18,1)){
+  print(i)
+  selected = cells_selected[cells_selected$cluster == i,]
+  print(dim(selected))
+  
+  # linear mixed-effects model 
+  res = lmer(nucleus_area_log ~ condition + (1 | replicate/sample), data = selected)
+  posthoc = emmeans(res, pairwise ~ condition)
+  res = coef(summary(res))
+  res = as.data.frame(res)
+  res$cluster = i
+
+  # post hoc
+  means = as.data.frame(posthoc$emmeans)
+  means$cluster = i
+  contrasts =  as.data.frame(posthoc$contrasts)
+  contrasts$cluster = i
+  
+  all_emmeans[[i+1]] = means
+  all_contrasts[[i+1]] = contrasts
+  all_coef[[i+1]] = res
+}
+
+write.csv(do.call(rbind, all_emmeans), paste0(cell_stats_dir, "emmeans_nucleus_size.csv"))
+
+all_contrasts_df = do.call(rbind, all_contrasts)
+all_contrasts_df$p.adj.overall = p.adjust(all_contrasts_df$p.value, method = "fdr")
+write.csv(all_contrasts_df, paste0(cell_stats_dir, "contrasts_nucleus_size.csv"))
+
+all_coef_df = do.call(rbind, all_coef)
+write.csv(all_coef_df, paste0(cell_stats_dir, "lmer_nucleus_size.csv"))
+```

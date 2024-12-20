@@ -1,0 +1,657 @@
+---
+title: "Main analysis of Xenium data for 'Growth of the maternal intestine during reproduction'"
+output: html_notebook
+---
+
+Load packages.
+```{r}
+library(Seurat)
+library(future)
+plan("multisession", workers = 8)
+library(ggplot2)
+library(interp)
+library(rdist)
+library(Matrix)
+library(dplyr)
+library(future)
+library(BPCells)
+options(future.globals.maxSize = 12000*1024^2)
+source("seurat_utility_functions.R")
+library(data.table)
+library(patchwork)
+```
+
+# Read in data
+
+Set dataset info for run 1.
+```{r}
+datasets_r1 = c("output-XETG00207__0034181__TA1__20240704__113512","output-XETG00207__0034181__TA2__20240704__113512","output-XETG00207__0034181__TA3__20240704__113512","output-XETG00207__0033712__TA4__20240704__113512","output-XETG00207__0033712__TA5__20240704__113512","output-XETG00207__0033712__TA6__20240704__113512")
+names(datasets_r1) = c("TA1","TA2","TA3","TA4","TA5","TA6")
+meta = c("V","P","L","V","P","L")
+names(meta) =  c("TA1","TA2","TA3","TA4","TA5","TA6")
+```
+
+Read in raw counts and meta data for run 1.
+```{r}
+mat = Read10X_h5(paste0("../20240704__113302__040724_Tomo_mouse_gutroll_run1/", datasets_r1[["TA1"]],"/nuclei_data.h5"))
+colnames(mat) = paste0("TA1-",colnames(mat))
+meta_data = data.frame(cell = colnames(mat), sample = "TA1", condition =  meta["TA1"])
+
+for (sample in c("TA2","TA3","TA4","TA5","TA6")){
+  print(sample)
+  mat_tmp = Read10X_h5(paste0("../20240704__113302__040724_Tomo_mouse_gutroll_run1/", datasets_r1[[sample]],"/nuclei_data.h5"))
+  colnames(mat_tmp) = paste0(sample,"-",colnames(mat_tmp))
+  meta_data = rbind(meta_data,data.frame(cell = colnames(mat_tmp), sample = sample, condition =  meta[sample]))
+  mat = cbind(mat, mat_tmp)
+}
+```
+
+Set dataset info for run 2.
+```{r}
+datasets_r2 = c("output-XETG00207__0033726__TA7__20240710__115843","output-XETG00207__0033726__TA8__20240710__115843","output-XETG00207__0033726__TA9__20240710__115843","output-XETG00207__0033724__TA10__20240710__115843","output-XETG00207__0033724__TA11__20240710__115843","output-XETG00207__0033724__TA12__20240710__115843")
+names(datasets_r2) = c("TA7","TA8","TA9","TA10","TA11","TA12")
+meta = c("V","P","L","V","P","L")
+names(meta) =   c("TA7","TA8","TA9","TA10","TA11","TA12")
+```
+
+Read in raw counts and metadata for run 2.
+```{r}
+for (sample in  c("TA7","TA8","TA9","TA10","TA11","TA12")){
+  print(sample)
+  mat_tmp = Read10X_h5(paste0("../20240710__115631__100724_Tomo_mouse_gutroll_run2/", datasets_r2[[sample]],"/nuclei_data.h5"))
+  colnames(mat_tmp) = paste0(sample,"-",colnames(mat_tmp))
+  meta_data = rbind(meta_data,data.frame(cell = colnames(mat_tmp), sample = sample, condition =  meta[sample]))
+  mat = cbind(mat, mat_tmp)
+}
+```
+
+Set rownames for the metadata.
+```{r}
+rownames(meta_data) = colnames(mat)
+```
+
+Create Seurat object
+```{r}
+xenium.obj = CreateSeuratObject(mat)
+```
+
+Add sample and condition
+```{r}
+xenium.obj$sample = meta_data$sample
+xenium.obj$condition = meta_data$condition 
+```
+
+Make directory for output.
+```{r}
+directory = "../output/merged_analysis_nuclei/"
+dir.create(directory)
+```
+
+Change matrix type to uint32_t.
+```{r}
+mat = convert_matrix_type(mat, type = "uint32_t")
+```
+
+Write matrix to a directory and load it.
+```{r}
+write_matrix_dir(mat = mat, dir = paste0(directory,'/bpcells_counts'), overwrite = TRUE)
+counts.mat = open_matrix_dir(dir = paste0(directory,'/bpcells_counts'))
+```
+
+Create Seurat object.
+```{r}
+xenium.obj = CreateSeuratObject(counts.mat)
+
+#remove unnecessary objects and free up memory.
+rm(mat)
+rm(mat_tmp)
+gc()
+
+#add metadata
+xenium.obj$sample = meta_data$sample
+xenium.obj$condition = meta_data$condition 
+
+dim(xenium.obj)
+```
+
+We have 3410876 cells
+
+Relaxed filtering - remove cells with zero counts. Here we don't really want holes in the tissue.
+```{r}
+xenium.obj = subset(xenium.obj, subset = nCount_RNA > 0)
+dim(xenium.obj)
+```
+
+Now we have 3580743 cells.
+
+
+# Analysis of all populations
+
+Normalise data and find variable features.
+```{r}
+xenium.obj = NormalizeData(xenium.obj)
+xenium.obj = FindVariableFeatures(xenium.obj)
+```
+
+Create sketch.
+```{r}
+xenium.obj = SketchData(
+  object = xenium.obj,
+  ncells = 500000,
+  method = "LeverageScore",
+  sketched.assay = "sketch"
+)
+xenium.obj
+```
+
+Save seurat object.
+```{r}
+saveRDS(xenium.obj, paste0(directory,"merged_BPCells.rds"))
+```
+
+Dimensionality reduction, clustering and UMAP calculation.
+```{r}
+DefaultAssay(xenium.obj) = "sketch"
+xenium.obj = ScaleData(xenium.obj)
+xenium.obj = RunPCA(xenium.obj, npcs = 30, features = rownames(xenium.obj))
+xenium.obj = RunUMAP(xenium.obj, dims = 1:30, return.model = TRUE)
+xenium.obj = FindNeighbors(xenium.obj, reduction = "pca", dims = 1:30)
+xenium.obj = FindClusters(xenium.obj, resolution = 0.3)
+```
+
+Save Seurat object.
+```{r}
+saveRDS(xenium.obj, paste0(directory,"merged_BPCells_clustered.rds"))
+```
+
+Plot UMAP
+```{r}
+DimPlot(xenium.obj, cols = "polychrome", label = T)
+ggsave(paste0(directory, "UMAP_res0.3.png"))
+
+DimPlot(xenium.obj, group.by = "condition")
+ggsave(paste0(directory, "UMAP_condition.png"))
+
+DimPlot(xenium.obj, group.by = "sample", cols = "polychrome")
+ggsave(paste0(directory, "UMAP_sample.png"))
+```
+
+Change multsession plan to 1 worker otherwise getMarkers function encounters problems.
+```{r}
+plan("multisession", workers = 1)
+top5 = getMarkers(xenium.obj, "all_cells_res0.3", directory)
+```
+
+Project clusters from sketched analysis onto full dataset.
+```{r}
+xenium.obj = ProjectData(
+  object = xenium.obj,
+  assay = "RNA",
+  full.reduction = "pca.full",
+  sketched.assay = "sketch",
+  sketched.reduction = "pca",
+  umap.model = "umap",
+  dims = 1:30,
+  refdata = list(cluster_full = "seurat_clusters")
+)
+
+# Now that we have projected the full dataset, switch back to analyzing all cells
+DefaultAssay(xenium.obj) = "RNA"
+
+# Save seurat object.
+saveRDS(xenium.obj, paste0(directory,"merged_BPCells_projected.rds"))
+```
+
+Change projected clusters to from character to factor.
+```{r}
+xenium.obj$cluster_full = factor(xenium.obj$cluster_full, levels = levels(xenium.obj@active.ident))
+```
+
+Plot UMAP.
+```{r}
+DimPlot(xenium.obj, group.by = "cluster_full", cols = "polychrome")
+```
+
+Create plot without cluster 20 (as it has less than 2 cells).
+```{r}
+p = DimPlot(xenium.obj[,xenium.obj@active.ident != "20"], group.by = "cluster_full", cols = "polychrome") + ylab("umap_2") + xlab("umap_1")
+
+p + ggtitle("")
+
+ggsave(paste0(directory, "all_populations_UMAP_3410861_cells.png"))
+ggsave(paste0(directory, "all_populations_UMAP_3410861_cells.pdf"))
+```
+
+Switch back to sketched data.
+```{r}
+xenium.obj@active.assay = "sketch"
+```
+
+Plot UMAP of sketched data without cluster 20 (< 2 cells).
+```{r}
+p = DimPlot(xenium.obj[,xenium.obj@active.ident != "20"], cols = "polychrome") + ylab("umap_2") + xlab("umap_1")
+
+p + ggtitle("")
+
+ggsave(paste0(directory, "all_populations_UMAP_sketch_500000_cells.png"))
+
+ggsave(paste0(directory, "all_populations_UMAP_sketch_500000_cells.pdf"))
+```
+
+Create dotplot of markers excluding cluster 20 (< 2 cells).
+```{r}
+markers = read.csv(paste0(directory,"all_cells_res0.3_markers.csv"))
+
+markers = markers[markers$cluster != 20,]
+
+xenium.obj@active.assay = "sketch"
+
+xenium.obj$sketch_snn_res.0.3 = factor(xenium.obj$sketch_snn_res.0.3, levels = levels(xenium.obj@active.ident))
+  markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1) %>%
+    slice_head(n = 5) %>%
+    ungroup() -> top
+p = DotPlot(xenium.obj[,xenium.obj$sketch_snn_res.0.3 != 20], unique(top$gene), group.by = "sketch_snn_res.0.3") 
+p = p + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+print(p)
+ggsave(paste0(directory, "all_populations_res_0.3_marker_dotplot_v2.pdf"), height = 5, width = 13)
+```
+
+Create dotplot of markers excluding cluster 20 (< 2 cells) with Viridis colour scale. 
+```{r}
+xenium.obj$sketch_snn_res.0.3 = factor(xenium.obj$sketch_snn_res.0.3, levels = levels(xenium.obj@active.ident))
+  markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1) %>%
+    slice_head(n = 5) %>%
+    ungroup() -> top
+
+p = DotPlot(xenium.obj[,xenium.obj$sketch_snn_res.0.3 != 20], features = unique(top$gene)) +
+  guides(size = guide_legend(order = 1, reverse = TRUE), colour = guide_colourbar(order = 2)) + RotatedAxis() + scale_colour_viridis_c()
+print(p)
+
+ggsave(paste0(directory, "all_populations_res_0.3_marker_dotplot_tomo.pdf"), height = 6, width = 20)
+```
+
+Create dotplot of markers excluding cluster 20 (< 2 cells) with Viridis colour scale and no LFC cutoff. 
+```{r}
+xenium.obj$sketch_snn_res.0.3 = factor(xenium.obj$sketch_snn_res.0.3, levels = levels(xenium.obj@active.ident))
+  markers %>%
+    group_by(cluster) %>%
+    slice_head(n = 5) %>%
+    ungroup() -> top
+
+p = DotPlot(xenium.obj[,xenium.obj$sketch_snn_res.0.3 != 20], features = unique(top$gene)) +
+  guides(size = guide_legend(order = 1, reverse = TRUE), colour = guide_colourbar(order = 2)) + RotatedAxis() + scale_colour_viridis_c()
+print(p)
+
+ggsave(paste0(directory, "all_populations_res_0.3_marker_dotplot_noLFC_cutoff_tomo.pdf"), height = 6, width = 20)
+```
+
+Check cell numbers per cluster
+```{r}
+table(xenium.obj@active.ident)
+```
+
+
+# Epithelial cell analysis
+
+Switch to RNA assay.
+```{r}
+xenium.obj@active.assay = "RNA"
+```
+
+Subset epithelial clusters, switch to sketched assay and perform dimensionality 
+reduction and clustering.
+```{r}
+# subset cells in these clusters. Note that the data remains on-disk after subsetting
+epi.obj = subset(xenium.obj, subset = cluster_full %in% c("0","11", "18","10", "12","4","17","1","19"))
+dim(epi.obj)
+DefaultAssay(epi.obj) = "sketch"
+
+# recluster the cells
+epi.obj = ScaleData(epi.obj)
+epi.obj = RunPCA(epi.obj, npcs = 30, features = rownames(epi.obj))
+epi.obj = RunUMAP(epi.obj , dims = 1:30,return.model = TRUE)
+epi.obj = FindNeighbors(epi.obj , dims = 1:30)
+epi.obj = FindClusters(epi.obj,resolution = 0.5)
+
+saveRDS(epi.obj, paste0(directory,"epi_merged_BPCells.rds"))
+```
+
+Plot epithelial UMAP.
+```{r}
+DimPlot(epi.obj, cols = "polychrome", label = T)
+ggsave(paste0(directory, "epiUMAP_res0.5.png"))
+
+DimPlot(epi.obj, group.by = "condition")
+ggsave(paste0(directory, "epiUMAP_condition.png"))
+
+DimPlot(epi.obj, group.by = "sample", cols = "polychrome")
+ggsave(paste0(directory, "epiUMAP_sample.png"))
+```
+
+
+Create dotplot of paneth and goblet cell markers.
+```{r}
+DotPlot(epi.obj, c("Lyz1","Defa17","Defa22","Defa24","Ang4","Muc2","Clca1","Tff3","Agr2"))
+ggsave(paste0(directory, "epiDotplot_Paneth_Goblet.png"))
+```
+
+Create feature plots of known goblet cell markers.
+```{r}
+FeaturePlot(epi.obj, c("Muc2","Clca1","Tff3","Agr2"),max.cutoff = "q95")
+ggsave(paste0(directory, "epiUMAP_Goblet.png"),height = 20, width = 20)
+```
+
+Create feature plots of known paneth cell markers.
+```{r}
+FeaturePlot(epi.obj, c("Lyz1","Defa17","Defa22","Defa24","Ang4"),max.cutoff = "q95")
+ggsave(paste0(directory, "epiUMAP_Paneth.png"),height = 20, width = 20)
+```
+
+Project sketched clusters onto full dataset.
+```{r}
+epi.obj = ProjectData(
+  object = epi.obj,
+  assay = "RNA",
+  full.reduction = "pca.full.epi",
+  sketched.assay = "sketch",
+  sketched.reduction = "pca",
+  umap.model = "umap",
+  dims = 1:30,
+  refdata = list(cluster_full = "seurat_clusters")
+)
+
+# now that we have projected the full dataset, switch back to analyzing all cells.
+DefaultAssay(epi.obj) = "RNA"
+
+# save seurat object.
+saveRDS(epi.obj, paste0(directory,"epi_merged_BPCells_projected.rds"))
+```
+
+Calculate numbers of cells per cluster per condition.
+```{r}
+res = table(epi.obj$condition,epi.obj$cluster_full)
+write.csv(res, paste0(directory,"epi_merged_numbers_res0.5.csv"), row.names = F, quote = F)
+```
+
+Calculate fraction of cells per cluster per condition.
+```{r}
+write.csv(res/rowSums(res), paste0(directory,"epi_merged_fraction_res0.5.csv"), row.names = F, quote = F)
+```
+
+Plot epithelial UMAP - omit cluster 19 as < 3 cells.
+```{r}
+epi.obj$cluster_full = factor(epi.obj$cluster_full, levels = levels(epi.obj@active.ident))
+p = DimPlot(epi.obj[,epi.obj$cluster_full != "19"], group.by = "cluster_full", cols = "polychrome") + ylab("umap_2") + xlab("umap_1")
+p + ggtitle("")
+ggsave(paste0(directory, "epi_UMAP_1979657_cells.png"))
+ggsave(paste0(directory, "epi_UMAP_1979657_cells.pdf"))
+```
+
+Plot epithelial "sketch" UMAP - omit cluster 19 as < 3 cells.
+```{r}
+epi.obj@active.assay = "sketch"
+p = DimPlot(epi.obj[,epi.obj@active.ident != "19"], cols = "polychrome") + ylab("umap_2") + xlab("umap_1")
+p + ggtitle("")
+ggsave(paste0(directory, "epi_UMAP_sketch_243214_cells.png"))
+ggsave(paste0(directory, "epi_UMAP_sketch_243214_cells.pdf"))
+```
+
+Get markers for epithelial clusters.
+```{r}
+plan("multisession", workers = 1)
+top5 = getMarkers(epi.obj, "epi_res0.5", directory)
+```
+
+Create dotplot of epithelial marker (DE) genes - omit cluster 19 as < 3 cells.
+```{r}
+markers = read.csv(paste0(directory,"epi_res0.5_markers.csv"))
+
+markers = markers[markers$cluster != 19,]
+
+epi.obj$sketch_snn_res.0.5 = factor(epi.obj$sketch_snn_res.0.5, levels = levels(epi.obj@active.ident))
+  markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1) %>%
+    slice_head(n = 5) %>%
+    ungroup() -> top
+p = DotPlot(epi.obj[,epi.obj$sketch_snn_res.0.5 != "19"], unique(top$gene), group.by = "sketch_snn_res.0.5")
+p = p + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+print(p)
+ggsave(paste0(directory, "epi_res_0.5_marker_dotplot_v2.pdf"), height = 5, width = 12)
+```
+
+Create dotplot of epithelial marker (DE) genes with viridis colour scheme.
+```{r}
+epi.obj$sketch_snn_res.0.5 = factor(epi.obj$sketch_snn_res.0.5, levels = levels(epi.obj@active.ident))
+  markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1) %>%
+    slice_head(n = 5) %>%
+    ungroup() -> top
+
+p = DotPlot(epi.obj[,epi.obj@active.ident != "19"], features = unique(top$gene)) +
+  guides(size = guide_legend(order = 1, reverse = TRUE), colour = guide_colourbar(order = 2)) + RotatedAxis() + scale_colour_viridis_c()
+print(p)
+
+ggsave(paste0(directory, "epi_res_0.5_marker_dotplot_tomo.pdf"), height = 6, width = 20)
+```
+
+Create dotplot of epithelial marker (DE) genes with viridis colour scheme and no LFC cutoff.
+```{r}
+epi.obj$sketch_snn_res.0.5 = factor(epi.obj$sketch_snn_res.0.5, levels = levels(epi.obj@active.ident))
+  markers %>%
+    group_by(cluster) %>%
+    slice_head(n = 5) %>%
+    ungroup() -> top
+
+p = DotPlot(epi.obj[,epi.obj@active.ident != "19"], features = unique(top$gene)) +
+  guides(size = guide_legend(order = 1, reverse = TRUE), colour = guide_colourbar(order = 2)) + RotatedAxis() + scale_colour_viridis_c()
+print(p)
+
+ggsave(paste0(directory, "epi_res_0.5_marker_dotplot_tomo_noLFC_cutoff.pdf"), height = 6, width = 20)
+```
+
+# Spatial analysis
+
+Add cell centroids to xenium object.
+```{r}
+for (sample in  c("TA1","TA2","TA3","TA4","TA5","TA6")){
+  cells = fread(paste0("../20240704__113302__040724_Tomo_mouse_gutroll_run1/", datasets_r1[[sample]],"/cells.csv.gz"))
+  
+  cell_centroid_df = data.frame(
+          x = cells$x_centroid,
+          y = cells$y_centroid,
+          cell = paste0(sample, "-TA1-",cells$cell_id),
+          stringsAsFactors = FALSE
+        )
+  cell_centroid_df = cell_centroid_df[cell_centroid_df$cell %in% colnames(xenium.obj),]
+  centroid_data = list(
+      "centroids" = CreateCentroids(cell_centroid_df)
+  )
+
+  
+    coords <- CreateFOV(
+      coords = centroid_data,
+      type = c("centroids"),
+      assay = "RNA"
+  )
+  
+  xenium.obj[[sample]] = coords
+}
+
+for (sample in  c("TA7","TA8","TA9","TA10","TA11","TA12")){
+  cells = fread(paste0("../20240710__115631__100724_Tomo_mouse_gutroll_run2/", datasets_r2[[sample]],"/cells.csv.gz"))
+  
+  cell_centroid_df = data.frame(
+          x = cells$x_centroid,
+          y = cells$y_centroid,
+          cell = paste0(sample, "-TA1-",cells$cell_id),
+          stringsAsFactors = FALSE
+        )
+  cell_centroid_df = cell_centroid_df[cell_centroid_df$cell %in% colnames(xenium.obj),]
+  centroid_data = list(
+      "centroids" = CreateCentroids(cell_centroid_df)
+  )
+
+  
+    coords <- CreateFOV(
+      coords = centroid_data,
+      type = c("centroids"),
+      assay = "RNA"
+  )
+  
+  xenium.obj[[sample]] = coords
+}
+```
+
+Create directory to save images.
+```{r}
+image_dir = paste0(directory,"image_dim_res0.3/")
+dir.create(image_dir)
+```
+
+Make projected clusters active identity.
+```{r}
+xenium.obj@active.ident = factor(xenium.obj$cluster_full, levels = levels(xenium.obj@active.ident))
+```
+
+Create plots of gut rolls coloured by cluster.
+```{r}
+for (i in 1:12){
+sample = paste0("TA",i)
+ImageDimPlot(xenium.obj, size = 0.7, axes = T, fov = sample, cols = "polychrome")
+ggsave(paste0(image_dir,"res0.3_image_dim_plot_", sample,".png"), height = 30, width = 20)
+}
+```
+
+Create patchwork plot of all gut rolls coloured by cluster.
+```{r}
+plotList = list()
+for (i in 1:12){
+sample = paste0("TA",i)
+print(sample)
+p = ImageDimPlot(xenium.obj, size = 0.5, axes = T, fov = sample, cols = "polychrome")
+p = p + theme(legend.position="none") + ggtitle(sample) + xlim(0,10000) + ylim(0,10000)
+plotList[[sample]] = p
+}
+
+wrap_plots(plotList,
+           ncol=3)
+ggsave(paste0(directory,"res0.3_image_dim_plot.png"), height = 30, width = 30)
+```
+
+Add epithelial sub clusters to main xenium object.
+```{r}
+xenium.obj@active.assay = "RNA"
+epi.obj@active.ident = factor(epi.obj$cluster_full, levels = levels(epi.obj@active.ident))
+xenium.obj$epi_res0.5 = epi.obj@active.ident
+```
+
+
+Create directory to save epithelial cluster images.
+```{r}
+image_dir = paste0(directory,"image_dim_epi_res0.5/")
+dir.create(image_dir)
+```
+
+Create plots of gut rolls coloured by epithelial cluster.
+```{r}
+for (i in 1:12){
+sample = paste0("TA",i)
+ImageDimPlot(xenium.obj, size = 0.7, axes = T, fov = sample, cols = "polychrome", group.by = "epi_res0.5")
+ggsave(paste0(image_dir,"epi_res0.5_image_dim_plot_", sample,".png"), height = 30, width = 20)
+}
+```
+
+Create patchwork plot of all gut rolls coloured by epithelial cluster.
+```{r}
+plotList = list()
+for (i in 1:12){
+sample = paste0("TA",i)
+p = ImageDimPlot(xenium.obj, size = 0.4, axes = T, fov = sample, cols = "polychrome",group.by = "epi_res0.5")
+p = p + theme(legend.position="none") + ggtitle(sample) + xlim(0,10000) + ylim(0,10000)
+plotList[[sample]] = p
+}
+
+library(patchwork)
+wrap_plots(plotList,
+           ncol=3)
+ggsave(paste0(directory,"epi_res0.5_image_dim_plot.png"), height = 30, width = 30)
+```
+
+Create plots of gut rolls coloured by Slc5a4a expression.
+```{r}
+image_dir = paste0(directory,"image_feature_Slc5a4a/")
+dir.create(image_dir)
+
+for (i in 1:12){
+sample = paste0("TA",i)
+ImageFeaturePlot(xenium.obj, "Slc5a4a", size = 0.7, axes = T, fov = sample)
+ggsave(paste0(image_dir,"Slc5a4a_image_", sample,".png"), height = 30, width = 20)
+}
+```
+
+Create plots of gut rolls coloured by Slc5a4a expression with q95 max cutoff.
+```{r}
+image_dir = paste0(directory,"image_feature_Slc5a4a_q95/")
+dir.create(image_dir)
+
+for (i in 1:12){
+sample = paste0("TA",i)
+ImageFeaturePlot(xenium.obj, "Slc5a4a", size = 1, axes = T, fov = sample, max.cutoff = "q95")
+ggsave(paste0(image_dir,"Slc5a4a_image_", sample,".png"), height = 30, width = 20)
+}
+```
+
+Create patchwork plot of all gut rolls coloured by epithelial cluster.
+```{r}
+plotList = list()
+for (i in 1:12){
+sample = paste0("TA",i)
+p = ImageDimPlot(xenium.obj, size = 0.4, axes = T, fov = sample, cols = "polychrome",group.by = "epi_res0.5")
+p = p + theme(legend.position="none") + ggtitle(sample) + xlim(0,10000) + ylim(0,10000)
+plotList[[sample]] = p
+}
+
+wrap_plots(plotList,
+           ncol=3)
+ggsave(paste0(directory,"epi_res0.5_image_dim_plot.png"), height = 30, width = 30)
+```
+
+Create patchwork plots showing each epithelial cluster individually.
+```{r}
+res0.5_dir = paste0(directory,"res0.5_cluster_plots/")
+
+dir.create(res0.5_dir)
+for (cluster in unique(xenium.obj$epi_res0.5)){
+  cluster = as.character(cluster)
+  plotList = list()
+  xenium.obj$COI = NA
+  xenium.obj$COI[xenium.obj$epi_res0.5 == cluster] = cluster
+  for (i in 1:12){
+    sample = paste0("TA",i)
+    p = ImageDimPlot(xenium.obj, size = 0.5, axes = T, group.by = "COI", fov = sample)
+    p = p + theme(legend.position="none") + ggtitle(sample) + xlim(0,10000) + ylim(0,10000)
+    plotList[[sample]] = p
+  }
+  wrap_plots(plotList,
+           ncol=3)
+  ggsave(paste0(res0.5_dir,"epi_res0.5_image_dim_plot_cluster",cluster,".png"), height = 30, width = 30)
+}
+```
+
+# Save data
+
+Save meta data.
+```{r}
+write.csv(xenium.obj@meta.data,paste0(directory,"nuclei_meta.csv"))
+```
+
+Save Xenium object.
+```{r}
+saveRDS(xenium.obj, paste0(directory,"merged_BPCells_coords.rds"))
+```

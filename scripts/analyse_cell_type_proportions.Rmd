@@ -1,0 +1,185 @@
+---
+title: "Analyse cell type proportions"
+output: html_notebook
+---
+
+Load libraries.
+```{r}
+library(Seurat)
+library(future)
+plan("multisession", workers = 8)
+library(ggplot2)
+library(interp)
+library(rdist)
+library(Matrix)
+library(dplyr)
+library(future)
+library(BPCells)
+options(future.globals.maxSize = 3000*1024^2)
+source("seurat_utility_functions.R")
+library(data.table)
+library(speckle)
+```
+
+Set directory.
+```{r}
+nuclei_directory = "../output/merged_analysis_nuclei/"
+```
+
+Read in epithelial object.
+```{r}
+epi_nuc.obj = readRDS(paste0(nuclei_directory,"epi_merged_BPCells_projected.rds"))
+```
+
+# Run Propeller
+
+Get transformed proportions.
+```{r}
+props = getTransformedProps(epi_nuc.obj$cluster_full[epi_nuc.obj$cluster_full != "19"], epi_nuc.obj$sample[epi_nuc.obj$cluster_full != "19"], transform="logit")
+```
+
+Check sample order.
+```{r}
+colnames(props$TransformedProps)
+```
+
+Set metadata.
+```{r}
+sample = colnames(props$TransformedProps)
+condition = c("V","V","P","L","P","L","V","P","L","V","P","L")
+slide = c("1","4","4","4","1","1","2","2","2","3","3","3")
+```
+
+Create design matrix.
+```{r}
+design = model.matrix(~ 0 + condition + slide)
+design
+```
+
+Run Propeller anova test.
+```{r}
+anova.res = propeller.anova(prop.list=props, design=design, coef = c(1,2,3),
+                robust=TRUE, trend=FALSE, sort=TRUE)
+```
+
+Write Propeller anova results to file.
+```{r}
+write.csv(anova.res,paste0(nuclei_directory,"propeller_results_res0.5_nuclei_clusters_updated.csv"))
+```
+
+# Post hoc tests 
+
+Post hoc pairwise propeller T tests.
+```{r}
+mycontr = limma::makeContrasts(conditionV-conditionP, levels=design)
+ttest_V_P = propeller.ttest(props, design, contrasts = mycontr, robust=TRUE, trend=FALSE, 
+                sort=TRUE)
+
+mycontr = limma::makeContrasts(conditionV-conditionL, levels=design)
+ttest_V_L = propeller.ttest(props, design, contrasts = mycontr, robust=TRUE, trend=FALSE, 
+                sort=TRUE)
+
+mycontr = limma::makeContrasts(conditionP-conditionL, levels=design)
+ttest_P_L = propeller.ttest(props, design, contrasts = mycontr, robust=TRUE, trend=FALSE, 
+                sort=TRUE)
+```
+
+Adjust pvalues for multiple pairwise comparisons.
+```{r}
+pvals = c(ttest_V_P$P.Value,ttest_V_L$P.Value, ttest_P_L$P.Value)
+p.adj.overall = p.adjust(pvals, method = "fdr")
+
+ttest_V_P$FDR_overall = p.adj.overall[1:19]
+ttest_V_L$FDR_overall = p.adj.overall[20:38]
+ttest_P_L$FDR_overall = p.adj.overall[39:57]
+```
+
+Write results of Posthoc tests to file.
+```{r}
+write.csv(ttest_V_P,paste0(nuclei_directory,"propeller_results_V_P_res0.5_nuclei_clusters.csv"))
+write.csv(ttest_V_L,paste0(nuclei_directory,"propeller_results_V_L_res0.5_nuclei_clusters.csv"))
+write.csv(ttest_P_L,paste0(nuclei_directory,"propeller_results_P_L_res0.5_nuclei_clusters.csv"))
+```
+
+Version of analysis performing post hoc tests only on anova significant clusters.
+```{r}
+sig_clusters = rownames(anova.res)[anova.res$FDR < 0.05]
+```
+
+Filter proportions for significant clusters.
+```{r}
+props$Counts =  props$Counts[rownames(props$Counts) %in% sig_clusters,]
+props$TransformedProps =  props$TransformedProps[rownames(props$TransformedProps) %in% sig_clusters,]
+props$Proportions =  props$Proportions[rownames(props$Proportions) %in% sig_clusters,]
+```
+
+Post hoc pairwise propeller T tests.
+```{r}
+mycontr = limma::makeContrasts(conditionV-conditionP, levels=design)
+ttest_V_P = propeller.ttest(props, design, contrasts = mycontr, robust=TRUE, trend=FALSE, 
+                sort=TRUE)
+
+mycontr = limma::makeContrasts(conditionV-conditionL, levels=design)
+ttest_V_L = propeller.ttest(props, design, contrasts = mycontr, robust=TRUE, trend=FALSE, 
+                sort=TRUE)
+
+mycontr = limma::makeContrasts(conditionP-conditionL, levels=design)
+ttest_P_L = propeller.ttest(props, design, contrasts = mycontr, robust=TRUE, trend=FALSE, 
+                sort=TRUE)
+```
+
+
+Adjust pvalues for multiple pairwise comparisons
+```{r}
+pvals = c(ttest_V_P$P.Value,ttest_V_L$P.Value, ttest_P_L$P.Value)
+p.adj.overall = p.adjust(pvals, method = "fdr")
+ttest_V_P$FDR_overall = p.adj.overall[1:15]
+ttest_V_L$FDR_overall = p.adj.overall[16:30]
+ttest_P_L$FDR_overall = p.adj.overall[31:45]
+```
+
+Write results of Posthoc tests to file.
+```{r}
+write.csv(ttest_V_P,paste0(nuclei_directory,"propeller_results_V_P_res0.5_nuclei_clusters_only_anova_sig.csv"))
+write.csv(ttest_V_L,paste0(nuclei_directory,"propeller_results_V_L_res0.5_nuclei_clusters_only_anova_sig.csv"))
+write.csv(ttest_P_L,paste0(nuclei_directory,"propeller_results_P_L_res0.5_nuclei_clusters_only_anova_sig.csv"))
+```
+
+# Create plots
+
+Format data.
+```{r}
+proportions = props$Proportions
+
+proportions = melt(proportions, id.vars = "clusters")
+
+proportions$condition = ""
+proportions$condition[proportions$sample %in% c("TA1","TA4","TA7","TA10")] = "Virgin"
+proportions$condition[proportions$sample %in% c("TA2","TA5","TA8","TA11")] = "Pregnant"
+proportions$condition[proportions$sample %in% c("TA3","TA6","TA9","TA12")] = "Lactating"
+
+proportions$replicate = ""
+proportions$replicate[proportions$sample %in% c("TA1","TA2","TA3")] = 1
+proportions$replicate[proportions$sample %in% c("TA4","TA5","TA6")] = 2
+proportions$replicate[proportions$sample %in% c("TA7","TA8","TA9")] = 3
+proportions$replicate[proportions$sample %in% c("TA10","TA11","TA12")] = 4
+
+proportions$replicate = factor(proportions$replicate, levels = c(1,2,3,4))
+
+proportions$clusters = factor(proportions$clusters, levels = 0:18)
+proportions$condition = factor(proportions$condition, levels = c("Virgin", "Pregnant","Lactating"))
+```
+
+Set colour palette.
+```{r}
+pal = DiscretePalette(28, palette = "polychrome")
+```
+
+Create stacked bar plot.
+```{r}
+ggplot(proportions, aes(fill=clusters, y=value, x=replicate)) + 
+    geom_bar(position="stack", stat="identity") + facet_wrap(~condition) + scale_fill_manual(values = pal) + theme_classic() +
+  theme(text = element_text(size = 20))
+ggsave(paste0(nuclei_directory, "cell_type_proportions_nuclei.pdf"))
+```
+

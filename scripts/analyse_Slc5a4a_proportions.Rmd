@@ -1,0 +1,236 @@
+---
+title: "Analyse Slc5a4a proportions"
+output: html_notebook
+---
+
+Load libraries.
+```{r}
+library(Seurat)
+library(future)
+plan("multisession", workers = 8)
+library(ggplot2)
+library(Matrix)
+library(dplyr)
+library(future)
+library(BPCells)
+options(future.globals.maxSize = 3000*1024^2)
+source("seurat_utility_functions.R")
+library(data.table)
+library(speckle)
+```
+
+Set directory.
+```{r}
+directory = "../output/merged_analysis_nuclei/"
+```
+
+# Format data for analysis
+
+Read in epithelial object.
+```{r}
+epi.obj = readRDS(paste0(directory,"epi_merged_BPCells_projected.rds"))
+```
+
+Get counts for Slc5a4a.
+```{r}
+Slc5a4a = FetchData(epi.obj, vars = "Slc5a4a", layer = "counts") 
+```
+
+Check number positive cells.
+```{r}
+sum(Slc5a4a$Slc5a4a > 0)
+```
+
+Set categories based on Slc5a4a expression.
+```{r}
+epi.obj$Slc5a4a_status = "Slc5a4a_neg"
+epi.obj$Slc5a4a_status[Slc5a4a$Slc5a4a > 0] = "Slc5a4a_pos"
+```
+
+Create directory for results.
+```{r}
+res_directory = paste0(directory, "Slc5a4a_proportions/")
+dir.create(res_directory)
+```
+
+# Run Propeller
+
+Get transformed proportions (omit cluster 19 as too few cells).
+```{r}
+props = getTransformedProps(epi.obj$Slc5a4a_status[epi.obj$cluster_full != "19"], epi.obj$sample[epi.obj$cluster_full != "19"], transform="logit")
+```
+
+Check sample order.
+```{r}
+colnames(props$TransformedProps)
+```
+
+Create meta data.
+```{r}
+sample = colnames(props$TransformedProps)
+condition = c("V","V","P","L","P","L","V","P","L","V","P","L")
+slide = c("1","4","4","4","1","1","2","2","2","3","3","3")
+```
+
+Create design matrix.
+```{r}
+design = model.matrix(~ 0 + condition + slide)
+design
+```
+
+Run propeller anova.
+```{r}
+anova.res = propeller.anova(prop.list=props, design=design, coef = c(1,2,3),
+                robust=TRUE, trend=FALSE, sort=TRUE)
+```
+
+Run post hoc propeller T tests.
+```{r}
+mycontr = limma::makeContrasts(conditionV-conditionP, levels=design)
+ttest_V_P = propeller.ttest(props, design, contrasts = mycontr, robust=TRUE, trend=FALSE, 
+                sort=TRUE)
+
+mycontr = limma::makeContrasts(conditionV-conditionL, levels=design)
+ttest_V_L = propeller.ttest(props, design, contrasts = mycontr, robust=TRUE, trend=FALSE, 
+                sort=TRUE)
+
+mycontr = limma::makeContrasts(conditionP-conditionL, levels=design)
+ttest_P_L = propeller.ttest(props, design, contrasts = mycontr, robust=TRUE, trend=FALSE, 
+                sort=TRUE)
+```
+
+Adjust p values for multiple testing
+```{r}
+pvals = c(ttest_V_P$P.Value,ttest_V_L$P.Value, ttest_P_L$P.Value)
+p.adj.overall = p.adjust(pvals, method = "fdr")
+
+ttest_V_P$FDR_overall = p.adj.overall[1:2]
+ttest_V_L$FDR_overall = p.adj.overall[3:4]
+ttest_P_L$FDR_overall = p.adj.overall[5:6]
+```
+
+Make directory for results.
+```{r}
+res_directory = paste0(directory, "Slc5a4a_proportions/")
+dir.create(res_directory)
+```
+
+Write results to file
+```{r}
+write.csv(ttest_V_P,paste0(res_directory,"propeller_results_V_P_Slc5a4a.csv"))
+write.csv(ttest_V_L,paste0(res_directory,"propeller_results_V_L_Slc5a4a.csv"))
+write.csv(ttest_P_L,paste0(res_directory,"propeller_results_P_L_Slc5a4a.csv"))
+write.csv(anova.res,paste0(res_directory,"propeller_results_Slc5a4a.csv"))
+```
+
+# Create plots
+
+Format data.
+```{r}
+proportions = props$Proportions
+proportions = melt(proportions, id.vars = "clusters")
+
+proportions$condition = ""
+proportions$condition[proportions$sample %in% c("TA1","TA4","TA7","TA10")] = "Virgin"
+proportions$condition[proportions$sample %in% c("TA2","TA5","TA8","TA11")] = "Pregnant"
+proportions$condition[proportions$sample %in% c("TA3","TA6","TA9","TA12")] = "Lactating"
+
+proportions$replicate = ""
+proportions$replicate[proportions$sample %in% c("TA1","TA2","TA3")] = 1
+proportions$replicate[proportions$sample %in% c("TA4","TA5","TA6")] = 2
+proportions$replicate[proportions$sample %in% c("TA7","TA8","TA9")] = 3
+proportions$replicate[proportions$sample %in% c("TA10","TA11","TA12")] = 4
+
+proportions$replicate = factor(proportions$replicate, levels = c(1,2,3,4))
+
+proportions$clusters = factor(proportions$clusters, levels = c("Slc5a4a_neg","Slc5a4a_pos"))
+proportions$condition = factor(proportions$condition, levels = c("Virgin", "Pregnant","Lactating"))
+```
+
+Create plot
+```{r}
+ggplot(proportions, aes(fill=clusters, y=value, x=replicate)) + 
+    geom_bar(position="stack", stat="identity") + facet_wrap(~condition) + theme_classic() +
+  theme(text = element_text(size = 20))
+ggsave(paste0(res_directory, "Slc5a4a_proportions_nuclei.pdf"))#, height = 3, width = 6)
+```
+
+# Run propeller analysis for each cluster individually
+
+Wrap above analysis in function.
+```{r}
+run_propeller_cluster = function(cluster){
+  props = getTransformedProps(epi.obj$Slc5a4a_status[epi.obj$cluster_full == cluster], epi.obj$sample[epi.obj$cluster_full == cluster], transform="logit")
+  print(cluster)
+  print(colnames(props$TransformedProps))
+  print(length(colnames(props$TransformedProps)))
+  
+  sample = colnames(props$TransformedProps)
+  condition = c("V","V","P","L","P","L","V","P","L","V","P","L")
+  slide = c("1","4","4","4","1","1","2","2","2","3","3","3")
+  
+  design <- model.matrix(~ 0 + condition + slide)
+  design
+  
+  anova.res = propeller.anova(prop.list=props, design=design, coef = c(1,2,3),
+                  robust=TRUE, trend=FALSE, sort=TRUE)
+  
+  mycontr = limma::makeContrasts(conditionV-conditionP, levels=design)
+  ttest_V_P = propeller.ttest(props, design, contrasts = mycontr, robust=TRUE, trend=FALSE, 
+                  sort=TRUE)
+  
+  mycontr = limma::makeContrasts(conditionV-conditionL, levels=design)
+  ttest_V_L = propeller.ttest(props, design, contrasts = mycontr, robust=TRUE, trend=FALSE, 
+                  sort=TRUE)
+  
+  mycontr = limma::makeContrasts(conditionP-conditionL, levels=design)
+  ttest_P_L = propeller.ttest(props, design, contrasts = mycontr, robust=TRUE, trend=FALSE, 
+                  sort=TRUE)
+  
+  pvals = c(ttest_V_P$P.Value,ttest_V_L$P.Value, ttest_P_L$P.Value)
+  p.adj.overall = p.adjust(pvals, method = "fdr")
+  
+  ttest_V_P$FDR_overall = p.adj.overall[1:2]
+  ttest_V_L$FDR_overall = p.adj.overall[3:4]
+  ttest_P_L$FDR_overall = p.adj.overall[5:6]
+  
+  res_directory = paste0(directory, "Slc5a4a_proportions/")
+  dir.create(res_directory)
+  
+  write.csv(ttest_V_P,paste0(res_directory,"propeller_results_V_P_Slc5a4a_cluster", cluster,".csv"))
+  write.csv(ttest_V_L,paste0(res_directory,"propeller_results_V_L_Slc5a4a_cluster",cluster,".csv"))
+  write.csv(ttest_P_L,paste0(res_directory,"propeller_results_P_L_Slc5a4a_cluster",cluster,".csv"))
+  write.csv(anova.res,paste0(res_directory,"propeller_results_Slc5a4a_cluster",cluster,".csv"))
+  proportions = props$Proportions
+  proportions = melt(proportions, id.vars = "clusters")
+
+  proportions$condition = ""
+  proportions$condition[proportions$sample %in% c("TA1","TA4","TA7","TA10")] = "Virgin"
+  proportions$condition[proportions$sample %in% c("TA2","TA5","TA8","TA11")] = "Pregnant"
+  proportions$condition[proportions$sample %in% c("TA3","TA6","TA9","TA12")] = "Lactating"
+
+  proportions$replicate = ""
+  proportions$replicate[proportions$sample %in% c("TA1","TA2","TA3")] = 1
+  proportions$replicate[proportions$sample %in% c("TA4","TA5","TA6")] = 2
+  proportions$replicate[proportions$sample %in% c("TA7","TA8","TA9")] = 3
+  proportions$replicate[proportions$sample %in% c("TA10","TA11","TA12")] = 4
+
+  proportions$replicate = factor(proportions$replicate, levels = c(1,2,3,4))
+  
+  proportions$clusters = factor(proportions$clusters, levels = c("Slc5a4a_neg","Slc5a4a_pos"))
+  proportions$condition = factor(proportions$condition, levels = c("Virgin", "Pregnant","Lactating"))
+
+  ggplot(proportions, aes(fill=clusters, y=value, x=replicate)) + 
+      geom_bar(position="stack", stat="identity") + facet_wrap(~condition) + theme_classic() +
+    theme(text = element_text(size = 20))
+  ggsave(paste0(res_directory, "Slc5a4a_proportions_nuclei_cluster",cluster,".pdf"))
+}
+```
+
+Iterate through clusters and run propeller.
+```{r}
+for (cluster in unique(epi.obj$cluster_full)){
+  try(run_propeller_cluster(cluster))
+}
+```
+

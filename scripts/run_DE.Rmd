@@ -1,0 +1,183 @@
+---
+title: "Run pseudobulk DE for each epithelial cluster"
+output: html_notebook
+---
+
+Load libraries
+```{r}
+library(Seurat)
+library(future)
+plan("multisession", workers = 8)
+library(ggplot2)
+library(interp)
+library(rdist)
+library(Matrix)
+library(dplyr)
+library(future)
+library(BPCells)
+options(future.globals.maxSize = 3000*1024^2)
+source("seurat_utility_functions.R")
+library(data.table)
+library(stringr)
+library(DESeq2)
+library(EnhancedVolcano)
+```
+
+Set directory.
+```{r}
+directory = "../output/merged_analysis_nuclei/"
+```
+
+# Create Pseudobulk
+
+Read in epithelial object.
+```{r}
+epi.obj = readRDS(paste0(directory,"epi_merged_BPCells_projected.rds"))
+```
+
+Set active assay to RNA.
+```{r}
+epi.obj@active.assay = "RNA"
+```
+
+Create pseudobulk.
+```{r}
+pseudo_bulk.epi = AggregateExpression(epi.obj, assays = "RNA", group.by = c("condition", "sample", "cluster_full"))
+```
+
+Create metadata for pseudobulk.
+```{r}
+pseudo_bulk_meta = lapply(colnames(pseudo_bulk.epi$RNA),str_split_1, "_") 
+pseudo_bulk_meta = do.call(rbind.data.frame,pseudo_bulk_meta)
+colnames(pseudo_bulk_meta) = c("condition", "sample", "cluster")
+rownames(pseudo_bulk_meta) = colnames(pseudo_bulk.epi$RNA)
+```
+
+Add slide information to pseudobulk.
+```{r}
+pseudo_bulk_meta$slide = ""
+pseudo_bulk_meta$slide[pseudo_bulk_meta$sample %in% c("TA1","TA2","TA3")] = "S1"
+pseudo_bulk_meta$slide[pseudo_bulk_meta$sample %in% c("TA4","TA5","TA6")] = "S2"
+pseudo_bulk_meta$slide[pseudo_bulk_meta$sample %in% c("TA7","TA8","TA9")] = "S3"
+pseudo_bulk_meta$slide[pseudo_bulk_meta$sample %in% c("TA10","TA11","TA12")] = "S4"
+```
+
+Remove cluster 19 (too few cells).
+```{r}
+pseudo_bulk.epi$RNA = pseudo_bulk.epi$RNA[,pseudo_bulk_meta$cluster != "19"]
+pseudo_bulk_meta = pseudo_bulk_meta[pseudo_bulk_meta$cluster != "19",]
+```
+
+# Run DE 
+
+Function to run DEseq2.
+```{r}
+run_deseq2 = function(condition1, condition2){
+  results = list()
+  for (cluster in unique(pseudo_bulk_meta$cluster)){
+ 
+    selected = pseudo_bulk.epi$RNA[,(pseudo_bulk_meta$cluster == cluster) & (pseudo_bulk_meta$condition %in% c(condition1,condition2)) ]
+    selected_meta = pseudo_bulk_meta[(pseudo_bulk_meta$cluster == cluster) & (pseudo_bulk_meta$condition %in% c(condition1,condition2)),]
+    selected_meta$condition = factor(selected_meta$condition, levels = c(condition1,condition2))
+    
+    dds = DESeqDataSetFromMatrix(countData = selected,
+                                  colData = selected_meta,
+                                  design = ~slide + condition)
+    
+    dds = DESeq(dds)
+    res = results(dds)
+    
+    res$cluster = cluster
+    res$gene = rownames(res)
+    
+    res = res[order(res$pvalue),]
+    res$gene = rownames(res)
+  
+    results[[cluster]] = res
+  }
+  results = do.call(rbind,results)
+  
+  # add adjusted p value that takes into account testing was done for multiple clusters.
+  results$padj_overall = p.adjust(results$pvalue,method = "BH")
+  return(results)
+}
+```
+
+Run DEseq for each pairwise comparison.
+```{r}
+results_v_p = run_deseq2("V","P")
+results_v_l = run_deseq2("V","L")
+results_p_l = run_deseq2("P","L")
+```
+
+Write results to file.
+```{r}
+write.csv(results_p_l, paste0(directory, "lactation_vs_pregnant_res0.5_nuclei.csv"))
+write.csv(results_v_p, paste0(directory, "pregnant_vs_virgin_res0.5_nuclei.csv"))
+write.csv(results_v_l, paste0(directory, "lactating_vs_virgin_res0.5_nuclei.csv"))
+```
+
+Write significant (pval <0.05) results to file.
+```{r}
+results_p_l = results_p_l[!(is.na(results_p_l$padj_overall)),]
+results_v_p = results_v_p[!(is.na(results_v_p$padj_overall)),]
+results_v_l = results_v_l[!(is.na(results_v_l$padj_overall)),]
+
+write.csv(results_p_l[results_p_l$padj_overall < 0.05,], paste0(directory, "lactation_vs_pregnant_res0.5_sig_nuclei.csv"))
+write.csv(results_v_p[results_v_p$padj_overall < 0.05,], paste0(directory, "pregnant_vs_virgin_res0.5_sig_nuclei.csv"))
+write.csv(results_v_l[results_v_l$padj_overall < 0.05,], paste0(directory, "lactating_vs_virgin_res0.5_sig_nuclei.csv"))
+```
+
+
+# Create volcano plots
+
+Read in DE.
+```{r}
+results_p_l = read.csv(paste0(directory, "lactation_vs_pregnant_res0.5_nuclei.csv"))
+results_v_l = read.csv(paste0(directory, "lactating_vs_virgin_res0.5_nuclei.csv"))
+results_v_p = read.csv(paste0(directory, "pregnant_vs_virgin_res0.5_nuclei.csv"))
+```
+
+Create directory for volcano plots
+```{r}
+volcanoDir= "../output/merged_analysis_nuclei/volcanoPlots/"
+dir.create(volcanoDir)
+```
+
+Function to make volcano plot.
+```{r}
+makeVolcano = function(results, cluster, name){
+  res = results[results$cluster == cluster,]
+  name = name
+  plot_name = paste0(name," cluster ", cluster)
+  EnhancedVolcano(res,
+      title = plot_name,
+      subtitle = "",
+      lab = res$gene,
+      x = 'log2FoldChange',
+      y = 'padj',
+      xlab = bquote(~Log[2]~ 'fold change'),
+      ylab = bquote(~-Log[10]~adjusted~italic(P)),
+      pCutoff = 0.05,
+      FCcutoff = 1,
+      pointSize = 4.0,
+      labSize = 6.0,
+      legendPosition = 'right',
+      legendLabSize = 12,
+      legendIconSize = 4.0,
+      drawConnectors = TRUE,
+      widthConnectors = 0.75)
+  
+  ggsave(paste0(volcanoDir,name, " cluster ", cluster,".pdf"), width = 8, height = 6)
+}
+```
+
+Iterate through clusters and create volcano plots.
+```{r}
+for (cluster in 0:18){
+  makeVolcano(results_p_l, cluster,  "Lactating vs pregnant")
+  makeVolcano(results_v_p, cluster,  "Pregnant vs virgin")
+  makeVolcano(results_v_l, cluster,  "Lactating vs virgin")
+}
+```
+
